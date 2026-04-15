@@ -57,7 +57,7 @@ Now open `.env` in any text editor and fill in your credentials:
 ```
 JIRA_EMAIL=your-email@company.com
 JIRA_API_TOKEN=your-personal-jira-token
-JIRA_DOMAIN=chitrapandey2829.atlassian.net
+JIRA_DOMAIN=<company>.atlassian.net
 ANTHROPIC_API_KEY=get-this-from-team-lead
 XRAY_CLIENT_ID=get-this-from-team-lead
 XRAY_CLIENT_SECRET=get-this-from-team-lead
@@ -78,7 +78,7 @@ Your personal Jira API token:
 **JIRA_DOMAIN**
 The domain is the same for everyone on the team:
 ```
-chitrapandey2829.atlassian.net
+<company>.atlassian.net
 ```
 
 **ANTHROPIC_API_KEY, XRAY_CLIENT_ID, XRAY_CLIENT_SECRET**
@@ -96,7 +96,7 @@ uvicorn main:app --reload
 
 You should see:
 ```
-JIRA_DOMAIN: chitrapandey2829.atlassian.net
+JIRA_DOMAIN: <company>.atlassian.net
 ANTHROPIC_API_KEY set: True
 INFO:     Uvicorn running on http://127.0.0.1:8000
 ```
