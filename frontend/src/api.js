@@ -32,3 +32,9 @@ export const pushToXray = async (projectKey, storyKey, testCases, xrayToken) => 
   });
   return resp.data;
 };
+
+// 5. Fetch existing TCs for a story from Xray
+export const fetchExistingTests = async (storyKey) => {
+  const resp = await axios.get(`${BASE_URL}/api/xray/tests/${storyKey}`);
+  return resp.data;
+};

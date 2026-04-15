@@ -75,20 +75,58 @@ def read_root():
 # Helper: extract plain text from Jira ADF
 # ─────────────────────────────────────────────
 def extract_text_from_adf(adf):
-    text_output = []
+    lines = []
 
-    def extract(node):
-        if isinstance(node, dict):
-            if node.get("type") == "text":
-                text_output.append(node.get("text", ""))
+    def extract(node, depth=0):
+        if not node:
+            return
+        node_type = node.get("type", "") if isinstance(node, dict) else ""
+
+        if node_type == "text":
+            lines.append(node.get("text", ""))
+
+        elif node_type == "hardBreak":
+            lines.append("\n")
+
+        elif node_type == "paragraph":
             for child in node.get("content", []):
-                extract(child)
-        elif isinstance(node, list):
-            for item in node:
-                extract(item)
+                extract(child, depth)
+            lines.append("\n")
 
+        elif node_type in ("bulletList", "orderedList"):
+            lines.append("\n")
+            for i, child in enumerate(node.get("content", [])):
+                prefix = f"{i+1}. " if node_type == "orderedList" else "• "
+                lines.append(prefix)
+                extract(child, depth + 1)
+
+        elif node_type == "listItem":
+            for child in node.get("content", []):
+                extract(child, depth)
+            lines.append("\n")
+
+        elif node_type == "heading":
+            for child in node.get("content", []):
+                extract(child, depth)
+            lines.append("\n")
+
+        elif node_type == "blockquote":
+            for child in node.get("content", []):
+                extract(child, depth)
+            lines.append("\n")
+
+        else:
+            for child in node.get("content", []):
+                extract(child, depth)
+
+    if isinstance(adf, str):
+        return adf
     extract(adf)
-    return " ".join(text_output).strip()
+    # Clean up excessive newlines
+    result = "".join(lines).strip()
+    import re
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -155,7 +193,7 @@ async def get_stories(
         stories.append({
             "key": issue.get("key"),
             "summary": f.get("summary", ""),
-            "description": extract_text_from_adf(f.get("description")) if f.get("description") else "",
+            "description": format_description(extract_text_from_adf(f.get("description"))) if f.get("description") else "",
             "status": f.get("status", {}).get("name", ""),
             "priority": f.get("priority", {}).get("name", "") if f.get("priority") else "",
             "assignee": f.get("assignee", {}).get("displayName", "Unassigned") if f.get("assignee") else "Unassigned",
@@ -165,10 +203,84 @@ async def get_stories(
         "stories": stories,
         "total": len(stories),
         "jql": jql,
+        "jira_domain": JIRA_DOMAIN,
     }
 
 
+
+
+def format_description(text):
+    if not text:
+        return ""
+    import re
+    text = re.sub(r"\s*Acceptance Criteria:?\s*", "\n\nAcceptance Criteria\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+So that\s+", "\nSo that ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\.\s+([A-Z])", ".\n\u2022 \\1", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
 # ─────────────────────────────────────────────
+# Fetch existing TCs for a story from Xray
+
+# ─────────────────────────────────────────────
+# Fetch existing TCs for a story from Xray
+# ─────────────────────────────────────────────
+@app.get("/api/xray/tests/{story_key}")
+async def get_existing_tests(story_key: str):
+    client_id = os.getenv("XRAY_CLIENT_ID")
+    client_secret = os.getenv("XRAY_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return {"tests": [], "total": 0}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        auth_resp = await client.post(
+            "https://xray.cloud.getxray.app/api/v2/authenticate",
+            json={"client_id": client_id, "client_secret": client_secret},
+            headers={"Content-Type": "application/json"},
+        )
+        if not auth_resp.is_success:
+            return {"tests": [], "total": 0}
+
+        token = auth_resp.text.strip().strip('"')
+
+        encoded = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
+        issue_resp = await client.get(
+            f"https://{JIRA_DOMAIN}/rest/api/3/issue/{story_key}",
+            headers={"Authorization": f"Basic {encoded}", "Accept": "application/json"},
+        )
+        if not issue_resp.is_success:
+            return {"tests": [], "total": 0}
+
+        issue_id = issue_resp.json().get("id")
+
+        query = (
+            "{ getTests(jql: \"issue in linkedIssues(" + issue_id + ")\"  , limit: 100) {"
+            " total results {"
+            " issueId jira(fields: [\"key\", \"summary\"]) } } }"
+        )
+
+        xray_resp = await client.post(
+            "https://xray.cloud.getxray.app/api/v2/graphql",
+            json={"query": query},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        if not xray_resp.is_success:
+            return {"tests": [], "total": 0}
+
+        data = xray_resp.json()
+        tests_data = data.get("data", {}).get("getTests", {})
+        if not tests_data:
+            return {"tests": [], "total": 0}
+        tests = []
+        for t in (tests_data.get("results") or []):
+            jira_fields = t.get("jira") or {}
+            key = jira_fields.get("key", "")
+            summary = jira_fields.get("summary", "")
+            if key:
+                tests.append({"key": key, "summary": summary})
+        return {"tests": tests, "total": tests_data.get("total", 0)}
+
 # 2. Generate test cases via Claude
 # ─────────────────────────────────────────────
 @app.post("/api/generate-tc")
@@ -206,6 +318,7 @@ Each element must follow this exact shape:
       "type": "Positive",
       "priority": "High",
       "preconditions": "What needs to be set up before the test",
+      "description": "Brief 1-2 sentence summary of what this test case verifies and why it is important",
       "steps": [
         {{
           "action": "What the tester does",
@@ -223,6 +336,9 @@ Rules:
 - Generate 3-5 test cases per story
 - Cover happy path, negative cases, and edge cases
 - Return pure JSON array only
+- Preconditions should only contain the MINIMUM system state required before testing begins (e.g. "User is logged in", "App is open"). Do NOT include test actions in preconditions
+- All meaningful test actions (e.g. adding a product to cart, filling a form, clicking a button) must be written as steps, not preconditions
+- Steps describe every action the tester takes during the test from start to finish
 
 Stories:
 {stories_text}"""
@@ -296,6 +412,7 @@ class XrayStep(BaseModel):
 class XrayTestCase(BaseModel):
     title: str
     preconditions: str = ""
+    description: Optional[str] = ""
     steps: List[XrayStep]
 
 class XrayPushRequest(BaseModel):
@@ -370,10 +487,17 @@ async def push_to_xray(req: XrayPushRequest):
 
         for tc in req.test_cases:
 
+            # Add precondition as first step if exists
+            all_steps = []
+            if tc.preconditions:
+                all_steps.append({"action": "Precondition", "data": "", "result": tc.preconditions})
+            for step in tc.steps:
+                all_steps.append({"action": step.action, "data": step.data or "", "result": step.result})
+
             # Build steps for GraphQL
             steps_gql = ", ".join([
-                f'{{ action: {json.dumps(step.action)}, data: {json.dumps(step.data or "")}, result: {json.dumps(step.result)} }}'
-                for step in tc.steps
+                f'{{ action: {json.dumps(s["action"])}, data: {json.dumps(s["data"])}, result: {json.dumps(s["result"])} }}'
+                for s in all_steps
             ])
 
             # Step 1: Create Test via Xray GraphQL createTest mutation
@@ -385,7 +509,7 @@ async def push_to_xray(req: XrayPushRequest):
                     jira: {{
                         fields: {{
                             summary: {json.dumps(tc.title)},
-                            project: {{ key: {json.dumps(req.project_key)} }}
+                            project: {{ key: "{req.project_key}" }}
                         }}
                     }}
                 ) {{
@@ -430,6 +554,28 @@ async def push_to_xray(req: XrayPushRequest):
             test_key = ""
             if test_issue and test_issue.get("jira"):
                 test_key = test_issue["jira"].get("key", "")
+
+            # Update Jira description with TC description
+            tc_description = getattr(tc, "description", "") or ""
+            if test_key and tc_description:
+                desc_payload = {
+                    "fields": {
+                        "description": {
+                            "type": "doc",
+                            "version": 1,
+                            "content": [{
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": tc_description}]
+                            }]
+                        }
+                    }
+                }
+                await client.put(
+                    f"https://{os.getenv('JIRA_DOMAIN')}/rest/api/3/issue/{test_key}",
+                    json=desc_payload,
+                    auth=(os.getenv("JIRA_EMAIL"), os.getenv("JIRA_API_TOKEN")),
+                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                )
 
             # Step 2: Link Test to Story using Jira issue link API
             # Link type "Test": inward = "is tested by", outward = "tests"
