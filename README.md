@@ -67,12 +67,12 @@ FastAPI Backend (port 8000)
 
 ```
 tc-generator/
-├── jira-claude-backend/        # FastAPI backend
+├── backend/        # FastAPI backend
 │   ├── main.py                 # All API endpoints
 │   ├── requirements.txt        # Python dependencies
 │   └── .env.example            # Environment variables template
 │
-└── tc-generator-ui/            # React frontend
+└── frontend/            # React frontend
     ├── src/
     │   ├── App.jsx             # Main app with step navigation
     │   ├── api.js              # API calls to FastAPI
@@ -113,7 +113,7 @@ tc-generator/
 git clone https://github.com/YOUR_USERNAME/tc-generator.git
 
 # Set up backend
-cd jira-claude-backend
+cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -132,7 +132,7 @@ uvicorn main:app --reload
 
 ```bash
 # Set up frontend
-cd tc-generator-ui
+cd frontend
 npm install
 
 # Run frontend
@@ -142,7 +142,7 @@ npm run dev
 
 ### Environment Variables
 
-Create a `.env` file in `jira-claude-backend/` with:
+Create a `.env` file in `backend/` with:
 
 ```
 JIRA_EMAIL=your-email@company.com
