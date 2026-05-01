@@ -221,18 +221,15 @@ def format_description(text):
 
 
 # ─────────────────────────────────────────────
-# Fetch existing TCs for a story from Xray
+# 2. Generate test cases via Claude
+# ─────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# Fetch existing TCs for a story from Xray
-# ─────────────────────────────────────────────
 @app.get("/api/xray/tests/{story_key}")
 async def get_existing_tests(story_key: str):
     client_id = os.getenv("XRAY_CLIENT_ID")
     client_secret = os.getenv("XRAY_CLIENT_SECRET")
     if not client_id or not client_secret:
         return {"tests": [], "total": 0}
-
     async with httpx.AsyncClient(timeout=30) as client:
         auth_resp = await client.post(
             "https://xray.cloud.getxray.app/api/v2/authenticate",
@@ -241,9 +238,7 @@ async def get_existing_tests(story_key: str):
         )
         if not auth_resp.is_success:
             return {"tests": [], "total": 0}
-
         token = auth_resp.text.strip().strip('"')
-
         encoded = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
         issue_resp = await client.get(
             f"https://{JIRA_DOMAIN}/rest/api/3/issue/{story_key}",
@@ -251,15 +246,11 @@ async def get_existing_tests(story_key: str):
         )
         if not issue_resp.is_success:
             return {"tests": [], "total": 0}
-
         issue_id = issue_resp.json().get("id")
-
         query = (
             "{ getTests(jql: \"issue in linkedIssues(" + issue_id + ")\"  , limit: 100) {"
-            " total results {"
-            " issueId jira(fields: [\"key\", \"summary\"]) } } }"
+            " total results { issueId jira(fields: [\"key\", \"summary\"]) } } }"
         )
-
         xray_resp = await client.post(
             "https://xray.cloud.getxray.app/api/v2/graphql",
             json={"query": query},
@@ -267,7 +258,6 @@ async def get_existing_tests(story_key: str):
         )
         if not xray_resp.is_success:
             return {"tests": [], "total": 0}
-
         data = xray_resp.json()
         tests_data = data.get("data", {}).get("getTests", {})
         if not tests_data:
@@ -281,8 +271,6 @@ async def get_existing_tests(story_key: str):
                 tests.append({"key": key, "summary": summary})
         return {"tests": tests, "total": tests_data.get("total", 0)}
 
-# 2. Generate test cases via Claude
-# ─────────────────────────────────────────────
 @app.post("/api/generate-tc")
 async def generate_tc(req: GenerateTCRequest):
     if not ANTHROPIC_API_KEY:
@@ -622,3 +610,711 @@ async def push_to_xray(req: XrayPushRequest):
             "failed": failed,
         }
     }
+
+# ─────────────────────────────────────────────
+# 5. Automate TC — Generate Playwright code
+# ─────────────────────────────────────────────
+
+class AutomateRequest(BaseModel):
+    story_key: str
+    story_summary: str
+    test_cases: list
+
+class MergeRequest(BaseModel):
+    github_token: str
+    repo: str
+    branch: str
+    file_path: str
+    generated_code: str
+    story_key: str = ""
+    all_stories: Optional[list] = None
+
+@app.post("/api/automate/generate")
+async def generate_playwright(req: AutomateRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="Anthropic API key not set")
+
+    # Build TC details for Claude
+    tc_details = ""
+    for tc in req.test_cases:
+        tc_details += f"""
+Test: {tc.get("title")}
+Type: {tc.get("type", "Positive")}
+Preconditions: {tc.get("preconditions", "")}
+Steps:
+"""
+        for i, step in enumerate(tc.get("steps", []), 1):
+            tc_details += f"  {i}. Action: {step.get('action')} | Data: {step.get('data', '')} | Expected: {step.get('result')}\n"
+        tc_details += "\n"
+
+    prompt = f"""You are a Playwright Python pytest automation expert. Generate a complete Python pytest test file for the following test cases from Jira story {req.story_key}: {req.story_summary}
+
+{tc_details}
+
+Use this exact framework structure:
+
+IMPORTS — always use full module path:
+- from pages.login_page import LoginPage
+- from pages.products_page import ProductsPage
+- from pages.cart_page import CartPage
+- from pages.checkout_page import CheckoutPage
+Only import pages actually needed.
+
+FIXTURES available in conftest.py:
+- login_page → LoginPage instance, already on login page (goto() already called)
+- products_page → ProductsPage instance
+- cart_page → CartPage instance
+- checkout_page → CheckoutPage instance
+- logged_in → ProductsPage instance, already logged in
+- test_data → dict loaded from data/testdata.json
+
+EXACT METHOD NAMES — use ONLY these methods:
+
+LoginPage:
+- login_page.login(username, password)
+- login_page.login_with_valid_user()
+- login_page.assert_login_success()
+- login_page.assert_error_message(message)
+- login_page.get_error_message()
+
+ProductsPage:
+- products_page.goto()
+- products_page.add_product_to_cart(product_name)
+- products_page.remove_product_from_cart(product_name)
+- products_page.go_to_cart()
+- products_page.get_cart_count()
+- products_page.assert_on_products_page()
+- products_page.assert_cart_count(count)
+- products_page.get_product_names()
+- products_page.logout()
+
+CartPage:
+- cart_page.goto()
+- cart_page.proceed_to_checkout()
+- cart_page.remove_item(product_name)
+- cart_page.assert_on_cart_page()
+- cart_page.assert_item_in_cart(product_name)
+- cart_page.assert_cart_is_empty()
+- cart_page.assert_cart_item_count(count)
+
+CheckoutPage:
+- checkout_page.fill_shipping_info(first_name, last_name, postal_code)
+- checkout_page.continue_to_overview()
+- checkout_page.finish_checkout()
+- checkout_page.assert_on_checkout_step1()
+- checkout_page.assert_on_checkout_step2()
+- checkout_page.assert_order_complete()
+- checkout_page.assert_error_message(message)
+
+TEST DATA — use these keys:
+- test_data["users"]["standard"]["username"] → "standard_user"
+- test_data["users"]["standard"]["password"] → "secret_sauce"
+- test_data["users"]["locked"]["username"] → "locked_out_user"
+- test_data["products"]["backpack"] → "Sauce Labs Backpack"
+- test_data["errors"]["locked_user"] → error message
+- test_data["errors"]["invalid_credentials"] → error message
+- test_data["checkout"]["valid"]["first_name"] → "John"
+
+Rules:
+- Return the imports needed AND the test method(s) — NO class declaration
+- Include only the imports that are actually used in the test methods
+- Use snake_case for all names
+- login_page fixture already has goto() called — do NOT call goto() again on login_page
+- For tests needing logged in state, use logged_in fixture instead of login_page
+- NEVER hardcode usernames, passwords, or product names — always use test_data keys
+- NEVER hardcode error messages — always use test_data["errors"] keys  
+- NEVER hardcode checkout info — always use test_data["checkout"]["valid"] keys
+- test_data["users"]["invalid"]["username"] = "invalid_user", test_data["users"]["invalid"]["password"] = "wrong_password"
+- ALWAYS use test_data for ALL data — never invent values or use TODO comments
+- Include ALL steps as actions in the test, not just comments
+- IMPORTANT: Only import page classes that are listed above in EXACT METHOD NAMES — do not import pages not listed
+- If a TC needs a page not in the list, use the closest available page or add a comment
+- NEVER add type hints to fixture parameters — write `def test_foo(self, login_page, test_data)` NOT `def test_foo(self, login_page: LoginPage, test_data: dict)`
+- Fixtures are injected by pytest by NAME only — no type annotations needed
+- ALWAYS wrap each step in `with allure.step("step description"):` for traceability
+- Always import allure at the top: `import allure`
+- Step descriptions should be human readable e.g. "Enter username: standard_user", "Click Add to Cart", "Verify cart count is 1"
+- Follow this pattern:
+    with allure.step("Navigate to products page"):
+        products_page.goto()
+    with allure.step("Add backpack to cart"):
+        products_page.add_product_to_cart(test_data["products"]["backpack"])
+    with allure.step("Verify cart count is 1"):
+        products_page.assert_cart_count(1)
+
+Follow this exact pattern:
+```python
+# Generated by TC Generator - Review selectors before running
+import pytest
+from pages.login_page import LoginPage
+
+
+class TestLogin:
+    def test_successful_login_with_valid_credentials(self, login_page, test_data):
+        # Precondition: User has a valid account
+
+        # Enter valid credentials and login
+        login_page.login(
+            test_data["users"]["standard"]["username"],
+            test_data["users"]["standard"]["password"]
+        )
+
+        # Verify redirected to products page
+        login_page.assert_login_success()
+```"""
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-opus-4-5",
+                "max_tokens": 4000,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+
+    if not resp.is_success:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    data = resp.json()
+    code = data["content"][0]["text"].strip()
+    # Remove markdown backticks if present
+    if code.startswith("```"):
+        code = code.split("\n", 1)[1] if "\n" in code else code
+        code = code.rsplit("```", 1)[0].strip()
+
+    # Generate filename from story summary
+    filename = req.story_summary.lower()
+    filename = "".join(c if c.isalnum() or c == " " else "" for c in filename)
+    filename = "test_" + "_".join(filename.split()) + ".py"
+
+    return {"code": code, "filename": filename}
+
+
+def get_page_file(story_summary: str) -> str:
+    s = story_summary.lower()
+    if "login" in s or "log in" in s or "logout" in s or "log out" in s:
+        return "pages/login_page.py"
+    elif "cart" in s:
+        return "pages/cart_page.py"
+    elif "product" in s or "listing" in s:
+        return "pages/products_page.py"
+    elif "checkout" in s:
+        return "pages/checkout_page.py"
+    return "pages/base_page.py"
+
+
+def build_generate_prompt(story_key: str, story_summary: str, test_cases: list) -> str:
+    tc_details = ""
+    for tc in test_cases:
+        tc_details += f"""
+Test: {tc.get("title")}
+Type: {tc.get("type", "Positive")}
+Preconditions: {tc.get("preconditions", "")}
+Steps:
+"""
+        for i, step in enumerate(tc.get("steps", []), 1):
+            tc_details += f"  {i}. Action: {step.get('action')} | Data: {step.get('data', '')} | Expected: {step.get('result')}\n"
+        tc_details += "\n"
+    return f"""You are a Playwright Python pytest automation expert. Generate test methods for Jira story {story_key}: {story_summary}
+
+{tc_details}
+
+Use this exact framework structure:
+IMPORTS — always use full module path: from pages.login_page import LoginPage etc.
+FIXTURES: login_page, products_page, cart_page, checkout_page, logged_in, test_data
+EXACT METHOD NAMES: login_page.login(), login_page.assert_login_success(), products_page.add_product_to_cart(), etc.
+TEST DATA: test_data["users"]["standard"]["username"], test_data["errors"]["invalid_credentials"] etc.
+
+Rules:
+- Return the imports needed AND the test method(s) — NO class declaration
+- Include only imports actually used in the test methods
+- NEVER hardcode values — always use test_data keys
+- NEVER hardcode error messages — use test_data["errors"] keys
+- NEVER add type hints to fixture parameters — write `def test_foo(self, login_page, test_data)` NOT `def test_foo(self, login_page: LoginPage, test_data: dict)`"""
+
+
+async def run_merge_claude(client, gen_code, file_path, story_key, existing_test, all_pages, existing_testdata, existing_conftest):
+    # Build pages section
+    pages_section = ""
+    for pf, code in all_pages.items():
+        if code:
+            pages_section += f"\n--- {pf} ---\n{code}\n"
+        else:
+            pages_section += f"\n--- {pf} --- (FILE DOES NOT EXIST YET)\n"
+
+    merge_prompt = f"""You are a Playwright Python pytest automation expert. Add new test methods into the existing Python test file.
+
+EXISTING TEST FILE ({file_path}):
+{existing_test if existing_test else "File does not exist yet - create from scratch with proper imports and class"}
+
+NEW TEST METHODS TO ADD:
+{gen_code}
+
+ALL PAGE OBJECTS IN FRAMEWORK:
+{pages_section}
+
+EXISTING TESTDATA (data/testdata.json):
+{existing_testdata}
+
+EXISTING CONFTEST (conftest.py):
+{existing_conftest}
+
+Rules:
+- Keep ALL existing code exactly as-is
+- The new code may include imports and test methods
+- Merge any new imports at the top (no duplicates)
+- Add new methods AFTER last existing test method inside the class
+- Add # -- Generated by TC Generator -- comment before new methods
+- Do NOT add duplicate imports or methods
+- CRITICAL: Before adding any method to a page file, check if a method with SIMILAR functionality already exists — if yes, use the existing method name in the test instead of creating a new one
+- For example: if `go_to_cart()` exists, do NOT create `click_cart_icon()` — use `go_to_cart()` instead
+- If a page file does not exist yet, create it with the needed class and methods
+- NEVER add type hints to fixture parameters in test files
+- Add missing testdata keys with "TODO: replace with actual value" placeholder
+- Return ONLY valid JSON with this structure:
+{{
+  "test_file": "complete test file content",
+  "page_files": {{"pages/login_page.py": "content or null if unchanged", "pages/products_page.py": "content or null if unchanged", "pages/cart_page.py": "content or null if unchanged", "pages/checkout_page.py": "content or null if unchanged"}},
+  "testdata": "complete testdata.json content or null if unchanged",
+  "conftest": "complete conftest.py content or null if unchanged",
+  "changes_summary": "brief description of all changes made"
+}}"""
+
+    resp = await client.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+        json={"model": "claude-opus-4-5", "max_tokens": 8000, "messages": [{"role": "user", "content": merge_prompt}]},
+    )
+    if not resp.is_success:
+        return {}
+
+    raw = resp.json()["content"][0]["text"].strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+        raw = raw.rsplit("```", 1)[0].strip()
+    try:
+        return json.loads(raw)
+    except:
+        return {}
+
+
+async def push_file_fn(client, headers, repo, path, content_str, sha, branch, story_key):
+    """Single file push - kept for compatibility but use batch_push_files for multiple files"""
+    import base64 as b64
+    encoded = b64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+    payload = {"message": f"feat: add automated tests for {story_key}", "content": encoded, "branch": branch}
+    if sha:
+        payload["sha"] = sha
+    r = await client.put(f"https://api.github.com/repos/{repo}/contents/{path}", headers=headers, json=payload)
+    return r.is_success
+
+
+async def batch_push_files(client, headers, repo, branch, files_dict, story_key):
+    """
+    Push multiple files in a single commit using Git Trees API.
+    files_dict: {path: content_str}
+    Returns list of successfully pushed paths.
+    """
+    import base64 as b64
+
+    if not files_dict:
+        return []
+
+    # Get current branch SHA
+    ref_resp = await client.get(
+        f"https://api.github.com/repos/{repo}/git/ref/heads/{branch}",
+        headers=headers,
+    )
+    if not ref_resp.is_success:
+        return []
+
+    base_sha = ref_resp.json()["object"]["sha"]
+
+    # Get base tree SHA
+    commit_resp = await client.get(
+        f"https://api.github.com/repos/{repo}/git/commits/{base_sha}",
+        headers=headers,
+    )
+    if not commit_resp.is_success:
+        return []
+
+    base_tree_sha = commit_resp.json()["tree"]["sha"]
+
+    # Create tree with all files
+    tree_items = []
+    for path, content_str in files_dict.items():
+        tree_items.append({
+            "path": path,
+            "mode": "100644",
+            "type": "blob",
+            "content": content_str,
+        })
+
+    tree_resp = await client.post(
+        f"https://api.github.com/repos/{repo}/git/trees",
+        headers=headers,
+        json={"base_tree": base_tree_sha, "tree": tree_items},
+    )
+    if not tree_resp.is_success:
+        return []
+
+    new_tree_sha = tree_resp.json()["sha"]
+
+    # Create commit
+    commit_resp = await client.post(
+        f"https://api.github.com/repos/{repo}/git/commits",
+        headers=headers,
+        json={
+            "message": f"feat: add automated tests for {story_key}",
+            "tree": new_tree_sha,
+            "parents": [base_sha],
+        },
+    )
+    if not commit_resp.is_success:
+        return []
+
+    new_commit_sha = commit_resp.json()["sha"]
+
+    # Update branch ref
+    update_resp = await client.patch(
+        f"https://api.github.com/repos/{repo}/git/refs/heads/{branch}",
+        headers=headers,
+        json={"sha": new_commit_sha},
+    )
+
+    if update_resp.is_success:
+        return list(files_dict.keys())
+    return []
+
+
+
+# ─────────────────────────────────────────────
+# Decide which test file to use for a story
+# ─────────────────────────────────────────────
+class FileDecisionRequest(BaseModel):
+    github_token: str
+    repo: str
+    story_key: str
+    story_summary: str
+    test_cases: list
+
+
+@app.post("/api/automate/decide-file")
+async def decide_test_file(req: FileDecisionRequest):
+    import base64 as b64
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        headers = {
+            "Authorization": f"token {req.github_token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+        # Fetch all existing test files from repo
+        existing_files = {}
+        try:
+            resp = await client.get(
+                f"https://api.github.com/repos/{req.repo}/contents/tests",
+                headers=headers,
+            )
+            if resp.is_success:
+                py_files = [f for f in resp.json() if f["name"].endswith(".py") and f["name"].startswith("test_")]
+                for f in py_files:
+                    file_resp = await client.get(f["url"], headers=headers)
+                    if file_resp.is_success:
+                        file_content = b64.b64decode(file_resp.json()["content"]).decode("utf-8")
+                        existing_files[f["path"]] = file_content[:500]  # first 500 chars to understand the file
+        except:
+            pass
+
+        # Build TC summary for Claude
+        tc_summary = ""
+        for tc in req.test_cases:
+            tc_summary += f"\nTC: {tc.get('title')}\n"
+            tc_summary += f"Preconditions: {tc.get('preconditions', '')}\n"
+            tc_summary += "Steps:\n"
+            for step in tc.get("steps", []):
+                tc_summary += f"  - {step.get('action')} → {step.get('result')}\n"
+
+        # Build existing files summary
+        files_summary = ""
+        if existing_files:
+            for path, content in existing_files.items():
+                files_summary += f"\n{path}:\n{content[:200]}...\n"
+        else:
+            files_summary = "No existing test files found."
+
+        # Ask Claude to decide
+        prompt = f"""You are a QA automation expert. Decide which test file the following test cases should be added to.
+
+STORY: {req.story_key} — {req.story_summary}
+
+TEST CASES:
+{tc_summary}
+
+EXISTING TEST FILES IN REPO:
+{files_summary}
+
+Rules:
+- Decide based on the PRIMARY feature being tested (what is the main assertion/validation?)
+- If the TC spans multiple pages, choose the file based on the main behavior being tested
+- If an existing file is a good match, use it
+- If no existing file matches, suggest a new filename following pattern: tests/test_{{feature}}.py
+- Keep filenames short and descriptive (e.g. test_cart.py, test_login.py, test_checkout.py)
+
+Return ONLY a valid JSON object:
+{{
+  "target_file": "tests/test_cart.py",
+  "exists": true,
+  "reason": "Brief explanation of why this file was chosen"
+}}"""
+
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-opus-4-5", "max_tokens": 500, "messages": [{"role": "user", "content": prompt}]},
+        )
+
+        if not resp.is_success:
+            # Fallback to simple slug
+            slug = req.story_summary.lower().replace(" ", "_")[:30]
+            return {"target_file": f"tests/test_{slug}.py", "exists": False, "reason": "Fallback"}
+
+        raw = resp.json()["content"][0]["text"].strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+            raw = raw.rsplit("```", 1)[0].strip()
+
+        try:
+            decision = json.loads(raw)
+            # Verify if file actually exists
+            decision["exists"] = decision.get("target_file", "") in existing_files
+            return decision
+        except:
+            slug = req.story_summary.lower().replace(" ", "_")[:30]
+            return {"target_file": f"tests/test_{slug}.py", "exists": False, "reason": "Fallback"}
+
+@app.post("/api/automate/merge")
+async def merge_playwright(req: MergeRequest):
+    import base64 as b64
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        headers = {
+            "Authorization": f"token {req.github_token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+        # Step 1: Get default branch SHA
+        repo_resp = await client.get(f"https://api.github.com/repos/{req.repo}", headers=headers)
+        if not repo_resp.is_success:
+            raise HTTPException(status_code=repo_resp.status_code, detail=f"GitHub repo error: {repo_resp.text}")
+
+        default_branch = repo_resp.json().get("default_branch", "main")
+        ref_resp = await client.get(f"https://api.github.com/repos/{req.repo}/git/ref/heads/{default_branch}", headers=headers)
+        if not ref_resp.is_success:
+            raise HTTPException(status_code=ref_resp.status_code, detail=f"GitHub ref error: {ref_resp.text}")
+
+        base_sha = ref_resp.json()["object"]["sha"]
+
+        # Step 2: Create branch tc-{story_key}-{timestamp}
+        from datetime import datetime
+        timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
+        branch_name = f"tc-{req.story_key}-{timestamp}"
+        create_branch_resp = await client.post(
+            f"https://api.github.com/repos/{req.repo}/git/refs",
+            headers=headers,
+            json={"ref": f"refs/heads/{branch_name}", "sha": base_sha},
+        )
+        if not create_branch_resp.is_success and "already exists" not in create_branch_resp.text:
+            raise HTTPException(status_code=create_branch_resp.status_code, detail=f"Branch error: {create_branch_resp.text}")
+
+        # Helper to fetch file from branch or default
+        async def fetch_file(path):
+            for ref in [branch_name, default_branch]:
+                r = await client.get(f"https://api.github.com/repos/{req.repo}/contents/{path}?ref={ref}", headers=headers)
+                if r.status_code == 200:
+                    data = r.json()
+                    return b64.b64decode(data["content"]).decode("utf-8"), data.get("sha")
+            return "", None
+
+        # Handle all_stories mode — generate and push separate files per story
+        if req.all_stories:
+            files_updated = []
+
+            # Fetch all existing test files once
+            all_existing_files = {}
+            try:
+                tests_resp = await client.get(
+                    f"https://api.github.com/repos/{req.repo}/contents/tests",
+                    headers=headers,
+                )
+                if tests_resp.is_success:
+                    for f in tests_resp.json():
+                        if f["name"].endswith(".py") and f["name"].startswith("test_"):
+                            fr = await client.get(f["url"], headers=headers)
+                            if fr.is_success:
+                                all_existing_files[f["path"]] = b64.b64decode(fr.json()["content"]).decode("utf-8")[:300]
+            except:
+                pass
+
+            for story_data in req.all_stories:
+                s_key = story_data.get("storyKey", "")
+                s_summary = story_data.get("storySummary", "")
+                s_tcs = story_data.get("testCases", [])
+
+                # Generate code for this story
+                gen_resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={"model": "claude-opus-4-5", "max_tokens": 4000, "messages": [{"role": "user", "content": build_generate_prompt(s_key, s_summary, s_tcs)}]},
+                )
+                if not gen_resp.is_success:
+                    continue
+
+                gen_code = gen_resp.json()["content"][0]["text"].strip()
+                if gen_code.startswith("```"):
+                    gen_code = gen_code.split("\n", 1)[1] if "\n" in gen_code else gen_code
+                    gen_code = gen_code.rsplit("```", 1)[0].strip()
+
+                # Ask Claude which file this story belongs to
+                tc_summary = "\n".join([f"- {tc.get('title')}: " + " -> ".join([s.get('action','') for s in tc.get('steps',[])[:2]]) for tc in s_tcs])
+                files_context = "\n".join([f"{p}: {c[:150]}" for p, c in all_existing_files.items()])
+
+                decide_prompt = f"""Which test file should these test cases go into?
+
+STORY: {s_key} - {s_summary}
+TEST CASES:
+{tc_summary}
+
+EXISTING FILES:
+{files_context if files_context else "No existing test files"}
+
+Return ONLY valid JSON: {{"target_file": "tests/test_cart.py", "exists": true}}
+Rules:
+- Base decision on PRIMARY PAGE being tested (cart, login, products, checkout)
+- Use page-based filenames: test_cart.py, test_login.py, test_products.py, test_checkout.py
+- If existing file matches, use it. Otherwise create new page-based file."""
+
+                decide_resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={"model": "claude-opus-4-5", "max_tokens": 100, "messages": [{"role": "user", "content": decide_prompt}]},
+                )
+
+                if decide_resp.is_success:
+                    raw = decide_resp.json()["content"][0]["text"].strip()
+                    if raw.startswith("```"):
+                        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+                        raw = raw.rsplit("```", 1)[0].strip()
+                    try:
+                        decision = json.loads(raw)
+                        s_file = decision.get("target_file", f"tests/test_{s_key.lower()}.py")
+                    except:
+                        s_file = f"tests/test_{s_key.lower()}.py"
+                else:
+                    s_file = f"tests/test_{s_key.lower()}.py"
+
+                existing, sha = await fetch_file(s_file)
+                s_all_pages = {}
+                s_page_shas = {}
+                for pf in ["pages/login_page.py", "pages/products_page.py", "pages/cart_page.py", "pages/checkout_page.py", "pages/base_page.py"]:
+                    code, psha = await fetch_file(pf)
+                    s_all_pages[pf] = code
+                    s_page_shas[pf] = psha
+                existing_testdata, testdata_sha = await fetch_file("data/testdata.json")
+                existing_conftest, conftest_sha = await fetch_file("conftest.py")
+
+                updates = await run_merge_claude(client, gen_code, s_file, s_key, existing, s_all_pages, existing_testdata, existing_conftest)
+
+                # Batch push all files for this story in ONE commit
+                story_files = {}
+                if updates.get("test_file"):
+                    story_files[s_file] = updates["test_file"]
+                for pf, pf_content in (updates.get("page_files") or {}).items():
+                    if pf_content:
+                        story_files[pf] = pf_content
+                if updates.get("testdata"):
+                    story_files["data/testdata.json"] = updates["testdata"]
+                if updates.get("conftest"):
+                    story_files["conftest.py"] = updates["conftest"]
+
+                pushed = await batch_push_files(client, headers, req.repo, branch_name, story_files, s_key)
+                files_updated.extend(pushed)
+
+            return {
+                "status": "merged",
+                "branch": branch_name,
+                "branch_url": f"https://github.com/{req.repo}/tree/{branch_name}",
+                "actions_url": f"https://github.com/{req.repo}/actions",
+                "file_path": ", ".join(files_updated),
+                "files_updated": files_updated,
+                "changes_summary": f"Added tests for {len(req.all_stories)} stories across {len(set(files_updated))} files",
+                "merged_code": f"Generated {len(files_updated)} test files",
+            }
+
+        # Step 3: Fetch all relevant files
+        existing_test, test_sha = await fetch_file(req.file_path)
+
+        # Fetch ALL page files
+        page_files_list = [
+            "pages/login_page.py",
+            "pages/products_page.py",
+            "pages/cart_page.py",
+            "pages/checkout_page.py",
+            "pages/base_page.py",
+        ]
+        all_pages = {}
+        page_shas = {}
+        for pf in page_files_list:
+            code, sha = await fetch_file(pf)
+            all_pages[pf] = code
+            page_shas[pf] = sha
+
+        existing_testdata, testdata_sha = await fetch_file("data/testdata.json")
+        existing_conftest, conftest_sha = await fetch_file("conftest.py")
+
+        # Step 4: Claude analyzes ALL files
+        updates = await run_merge_claude(
+            client, req.generated_code, req.file_path, req.story_key,
+            existing_test, all_pages, existing_testdata, existing_conftest
+        )
+
+        if not updates:
+            raise HTTPException(status_code=500, detail="Failed to generate updates")
+
+        # Step 5: Batch push ALL changed files in ONE commit
+        files_to_push = {}
+
+        if updates.get("test_file"):
+            files_to_push[req.file_path] = updates["test_file"]
+
+        for pf, pf_content in (updates.get("page_files") or {}).items():
+            if pf_content:
+                files_to_push[pf] = pf_content
+
+        if updates.get("testdata"):
+            files_to_push["data/testdata.json"] = updates["testdata"]
+
+        if updates.get("conftest"):
+            files_to_push["conftest.py"] = updates["conftest"]
+
+        files_updated = await batch_push_files(
+            client, headers, req.repo, branch_name, files_to_push, req.story_key
+        )
+
+        return {
+            "status": "merged" if existing_test else "new_file",
+            "branch": branch_name,
+            "branch_url": f"https://github.com/{req.repo}/tree/{branch_name}",
+            "actions_url": f"https://github.com/{req.repo}/actions",
+            "file_path": req.file_path,
+            "files_updated": files_updated,
+            "changes_summary": updates.get("changes_summary", ""),
+            "merged_code": updates.get("test_file", req.generated_code),
+        }
+

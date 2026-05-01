@@ -1,4 +1,4 @@
-export default function PushResults({ results, onReset }) {
+export default function PushResults({ results, onReset, onAutomate, testCases }) {
   const success = results.filter((r) => r.status === "success");
   const failed = results.filter((r) => r.status === "failed");
 
@@ -60,7 +60,14 @@ export default function PushResults({ results, onReset }) {
         ))}
       </div>
 
-      <button onClick={onReset} style={ghostBtn}>← Start over</button>
+      <div style={{ display: "flex", gap: "8px" }}>
+    <button onClick={onReset} style={ghostBtn}>← Start over</button>
+    {onAutomate && testCases && (
+      <button onClick={() => onAutomate(testCases)} style={{ ...ghostBtn, background: "#0f172a", color: "#fff", border: "none" }}>
+        ⚡ Generate Playwright code →
+      </button>
+    )}
+  </div>
     </div>
   );
 }

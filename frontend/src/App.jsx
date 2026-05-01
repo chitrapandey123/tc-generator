@@ -2,6 +2,7 @@ import { useState } from "react";
 import StoriesList from "./components/StoriesList";
 import ReviewTC from "./components/ReviewTC";
 import PushResults from "./components/PushResults";
+import AutomateTC from "./components/AutomateTC";
 import { fetchStories, generateTCs, getXrayToken, pushToXray } from "./api";
 
 const STEPS = [
@@ -9,6 +10,7 @@ const STEPS = [
   { label: "Stories", desc: "Select stories" },
   { label: "Review", desc: "Edit test cases" },
   { label: "Push", desc: "Send to Xray" },
+  { label: "Automate", desc: "Generate Playwright" },
 ];
 
 export default function App() {
@@ -20,6 +22,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
+  const [automatedTCs, setAutomatedTCs] = useState([]);
   const [jiraDomain, setJiraDomain] = useState("");
 
   const handleFetch = async () => {
@@ -51,12 +54,39 @@ export default function App() {
       for (const story of payload) {
         if (!story.testCases.length) continue;
         const result = await pushToXray(project, story.storyKey, story.testCases, token);
-        allResults.push(...result.results);
+        // Add storyKey to each result so handleAutomate can filter correctly
+        const resultsWithStory = result.results.map((r) => ({ ...r, storyKey: story.storyKey }));
+        allResults.push(...resultsWithStory);
       }
       setPushResults(allResults);
       setStep(3);
     } catch (e) { setError(e.response?.data?.detail || e.message); }
     finally { setLoading(false); setLoadingMsg(""); }
+  };
+
+  const handleAutomate = (tcs) => {
+    // Build set of successfully pushed TC titles with their story keys
+    const successMap = {};
+    pushResults
+      .filter((r) => r.status === "success")
+      .forEach((r) => {
+        if (!successMap[r.storyKey]) successMap[r.storyKey] = new Set();
+        successMap[r.storyKey].add(r.title);
+      });
+
+    // Only include stories and TCs that were pushed in THIS session
+    const filteredTCs = tcs
+      .filter((story) => successMap[story.storyKey])
+      .map((story) => ({
+        ...story,
+        testCases: story.testCases.filter((tc) =>
+          successMap[story.storyKey]?.has(tc.title)
+        ),
+      }))
+      .filter((s) => s.testCases.length > 0);
+
+    setAutomatedTCs(filteredTCs);
+    setStep(4);
   };
 
   const handleReset = () => {
@@ -240,7 +270,18 @@ export default function App() {
                 <div style={sectionTitle}>Push results</div>
                 <div style={sectionSub}>Test cases created in Xray and linked to their stories.</div>
               </div>
-              <PushResults results={pushResults} onReset={handleReset} />
+              <PushResults results={pushResults} onReset={handleReset} onAutomate={handleAutomate} testCases={testCases} />
+            </div>
+          )}
+
+          {/* Step 4 — Automate */}
+          {step === 4 && (
+            <div>
+              <div style={sectionHead}>
+                <div style={sectionTitle}>Generate Playwright code</div>
+                <div style={sectionSub}>Generate and merge Playwright test code from your test cases.</div>
+              </div>
+              <AutomateTC testCases={automatedTCs.length ? automatedTCs : testCases} onBack={() => setStep(3)} jiraDomain={jiraDomain} />
             </div>
           )}
         </div>

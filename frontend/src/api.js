@@ -38,3 +38,20 @@ export const fetchExistingTests = async (storyKey) => {
   const resp = await axios.get(`${BASE_URL}/api/xray/tests/${storyKey}`);
   return resp.data;
 };
+
+// Automate TC
+export const generatePlaywright = async (payload) => {
+  const resp = await axios.post(`${BASE_URL}/api/automate/generate`, payload);
+  return resp.data;
+};
+
+export const mergePlaywright = async (payload) => {
+  const resp = await axios.post(`${BASE_URL}/api/automate/merge`, payload);
+  return resp.data;
+};
+
+// Decide which test file to use
+export const decideTestFile = async (payload) => {
+  const resp = await axios.post(`${BASE_URL}/api/automate/decide-file`, payload);
+  return resp.data;
+};
