@@ -130,7 +130,7 @@ export default function AutomateTC({ testCases, onBack, jiraDomain }) {
     setLoading(true);
     setError("");
     const branchStoryKey = selectAll ? testCases.map(s => s.storyKey).join("-") : story.storyKey;
-    setLoadingMsg(`Pushing to branch tc-${branchStoryKey}...`);
+    setLoadingMsg(`Pushing to branch tc-${branchStoryKey} — please wait...`);
     try {
       const filePath = createNew ? suggestedFile : selectedFile;
       const data = await mergePlaywright({
@@ -202,7 +202,7 @@ export default function AutomateTC({ testCases, onBack, jiraDomain }) {
       {loading && (
         <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: "8px", padding: "10px 14px", marginBottom: "1rem", fontSize: "13px", color: "#1d4ed8", display: "flex", alignItems: "center", gap: "10px" }}>
           <div style={{ width: "14px", height: "14px", border: "2px solid #bfdbfe", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "spin 0.7s linear infinite", flexShrink: 0 }} />
-          {loadingMsg}
+          <span style={{ wordBreak: "break-all" }}>{loadingMsg}</span>
         </div>
       )}
 
@@ -294,32 +294,59 @@ export default function AutomateTC({ testCases, onBack, jiraDomain }) {
           </div>
 
           <div style={{ margin: "1rem 0", display: "flex", flexDirection: "column", gap: "8px" }}>
-            {/* Existing matched file */}
-            {testFiles.length > 0 && testFiles.map((file) => (
-              <div key={file} style={{ ...fileOption, borderColor: "#3b82f6", background: "#f0f7ff" }}>
-                <div style={{ width: "15px", height: "15px", borderRadius: "50%", background: "#3b82f6", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none"><polyline points="1,4 3,6 7,2" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/></svg>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: "13px", fontWeight: 500, color: "#0f172a" }}>{file}</div>
-                  <div style={{ fontSize: "11px", color: "#64748b" }}>New test will be merged into this file</div>
-                </div>
-                <span style={{ fontSize: "11px", background: "#dcfce7", color: "#15803d", padding: "2px 8px", borderRadius: "20px" }}>auto-matched</span>
+            {/* All stories mode — show each story separately */}
+            {selectAll ? (
+              <div>
+                {testCases.map((s) => {
+                  const sl = s.storySummary.toLowerCase();
+                  let targetFile = "tests/test_" + s.storySummary.toLowerCase().replace(/[^a-z0-9\s]/g, "").trim().split(/\s+/).slice(0, 3).join("_") + ".py";
+                  if (sl.includes("cart") || sl.includes("add item")) targetFile = "tests/test_cart.py";
+                  else if (sl.includes("login") || sl.includes("log in") || sl.includes("logout")) targetFile = "tests/test_login.py";
+                  else if (sl.includes("product") || sl.includes("listing")) targetFile = "tests/test_products.py";
+                  else if (sl.includes("checkout")) targetFile = "tests/test_checkout.py";
+                  return (
+                    <div key={s.storyKey} style={{ ...fileOption, borderColor: "#3b82f6", background: "#f0f7ff", marginBottom: "8px" }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "13px", fontWeight: 500, color: "#0f172a" }}>
+                          <span style={{ fontFamily: "monospace", background: "#f1f5f9", padding: "1px 6px", borderRadius: "4px", marginRight: "8px" }}>{s.storyKey}</span>
+                          → <code style={inlineCode}>{targetFile}</code>
+                        </div>
+                        <div style={{ fontSize: "11px", color: "#64748b", marginTop: "3px" }}>{s.testCases.length} test case{s.testCases.length !== 1 ? "s" : ""}</div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
+            ) : (
+              <>
+                {/* Single story — Existing matched file */}
+                {testFiles.length > 0 && testFiles.map((file) => (
+                  <div key={file} style={{ ...fileOption, borderColor: "#3b82f6", background: "#f0f7ff" }}>
+                    <div style={{ width: "15px", height: "15px", borderRadius: "50%", background: "#3b82f6", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <svg width="8" height="8" viewBox="0 0 8 8" fill="none"><polyline points="1,4 3,6 7,2" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: "13px", fontWeight: 500, color: "#0f172a" }}>{file}</div>
+                      <div style={{ fontSize: "11px", color: "#64748b" }}>New test will be merged into this file</div>
+                    </div>
+                    <span style={{ fontSize: "11px", background: "#dcfce7", color: "#15803d", padding: "2px 8px", borderRadius: "20px" }}>auto-matched</span>
+                  </div>
+                ))}
 
-            {/* Create new — only shown when no match found */}
-            {testFiles.length === 0 && (
-              <div style={{ ...fileOption, borderColor: "#3b82f6", background: "#f0f7ff" }}>
-                <div style={{ width: "15px", height: "15px", borderRadius: "50%", background: "#3b82f6", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none"><polyline points="1,4 3,6 7,2" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/></svg>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: "13px", fontWeight: 500, color: "#0f172a" }}>Create new file</div>
-                  <div style={{ fontSize: "11px", color: "#64748b" }}>{suggestedFile}</div>
-                </div>
-                <span style={{ fontSize: "11px", background: "#dbeafe", color: "#1d4ed8", padding: "2px 8px", borderRadius: "20px" }}>new</span>
-              </div>
+                {/* Create new — only shown when no match found */}
+                {testFiles.length === 0 && (
+                  <div style={{ ...fileOption, borderColor: "#3b82f6", background: "#f0f7ff" }}>
+                    <div style={{ width: "15px", height: "15px", borderRadius: "50%", background: "#3b82f6", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <svg width="8" height="8" viewBox="0 0 8 8" fill="none"><polyline points="1,4 3,6 7,2" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: "13px", fontWeight: 500, color: "#0f172a" }}>Create new file</div>
+                      <div style={{ fontSize: "11px", color: "#64748b" }}>{suggestedFile}</div>
+                    </div>
+                    <span style={{ fontSize: "11px", background: "#dbeafe", color: "#1d4ed8", padding: "2px 8px", borderRadius: "20px" }}>new</span>
+                  </div>
+                )}
+              </>
             )}
           </div>
 
@@ -341,8 +368,8 @@ export default function AutomateTC({ testCases, onBack, jiraDomain }) {
               <div>
                 <div style={cardTitle}>Review generated code</div>
                 <div style={cardSub}>
-                  Will be added to: <strong>{createNew ? suggestedFile : selectedFile}</strong>
-                  {" → "} branch: <strong>tc-{story.storyKey}</strong>
+                  Will be added to: <strong>{selectedFile === "__all__" ? "Multiple files (one per story)" : (createNew ? suggestedFile : selectedFile)}</strong>
+                  {" → "} branch: <strong>{selectAll ? testCases.map(s => s.storyKey).join("-") : story.storyKey}</strong>
                 </div>
               </div>
               <button onClick={() => copyToClipboard(generatedCode)} style={ghostBtn}>📋 Copy</button>
@@ -357,8 +384,8 @@ export default function AutomateTC({ testCases, onBack, jiraDomain }) {
             </div>
             <div style={{ background: "#f8fafc", borderRadius: "8px", padding: "12px", margin: "12px 0", fontSize: "12px", color: "#475569" }}>
               <div style={{ marginBottom: "4px" }}>📁 Repo: <strong>{repo}</strong></div>
-              <div style={{ marginBottom: "4px" }}>🌿 Branch: <strong>tc-{story.storyKey}</strong> (new, from main)</div>
-              <div>📄 File: <strong>{createNew ? suggestedFile : selectedFile}</strong></div>
+              <div style={{ marginBottom: "4px" }}>🌿 Branch: <strong>{selectAll ? `tc-${testCases.map(s => s.storyKey).join("-")}` : `tc-${story.storyKey}`}</strong> (new, from main)</div>
+              <div>📄 File: <strong>{selectedFile === "__all__" ? "Multiple files (one per story)" : (createNew ? suggestedFile : selectedFile)}</strong></div>
             </div>
             <button onClick={handlePushToGitHub} style={solidBtn}>
               ⚡ Push to GitHub & trigger CI →

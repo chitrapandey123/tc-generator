@@ -727,6 +727,8 @@ Rules:
 - test_data["users"]["invalid"]["username"] = "invalid_user", test_data["users"]["invalid"]["password"] = "wrong_password"
 - ALWAYS use test_data for ALL data — never invent values or use TODO comments
 - Include ALL steps as actions in the test, not just comments
+- NEVER hardcode error messages as strings — always use test_data["errors"] keys
+- If error message key is unknown, use test_data["errors"].get("key", "TODO: add to testdata.json")
 - IMPORTANT: Only import page classes that are listed above in EXACT METHOD NAMES — do not import pages not listed
 - If a TC needs a page not in the list, use the closest available page or add a comment
 - NEVER add type hints to fixture parameters — write `def test_foo(self, login_page, test_data)` NOT `def test_foo(self, login_page: LoginPage, test_data: dict)`
@@ -840,6 +842,10 @@ Rules:
 
 
 async def run_merge_claude(client, gen_code, file_path, story_key, existing_test, all_pages, existing_testdata, existing_conftest):
+    # Strip markdown backticks from gen_code if present
+    if gen_code.startswith("```"):
+        gen_code = gen_code.split("\n", 1)[1] if "\n" in gen_code else gen_code
+        gen_code = gen_code.rsplit("```", 1)[0].strip()
     # Build pages section
     pages_section = ""
     for pf, code in all_pages.items():
@@ -865,8 +871,13 @@ EXISTING TESTDATA (data/testdata.json):
 EXISTING CONFTEST (conftest.py):
 {existing_conftest}
 
-Rules:
-- Keep ALL existing code exactly as-is
+CRITICAL RULES — MUST FOLLOW:
+1. Keep ALL existing code EXACTLY as-is — do NOT modify, fix, or improve any existing code
+2. Keep ALL `with allure.step(...)` blocks from the new code EXACTLY as-is — do NOT remove, simplify or rewrite them
+3. Keep `import allure` in the imports section
+4. Do NOT change any existing test methods even if they look wrong
+
+Merge rules:
 - The new code may include imports and test methods
 - Merge any new imports at the top (no duplicates)
 - Add new methods AFTER last existing test method inside the class
@@ -875,6 +886,9 @@ Rules:
 - CRITICAL: Before adding any method to a page file, check if a method with SIMILAR functionality already exists — if yes, use the existing method name in the test instead of creating a new one
 - For example: if `go_to_cart()` exists, do NOT create `click_cart_icon()` — use `go_to_cart()` instead
 - If a page file does not exist yet, create it with the needed class and methods
+- In PAGE OBJECT methods (pages/*.py): use wait_for() for waits, NEVER use expect() — expect() is only for tests
+- In TEST methods (tests/*.py): use expect() for assertions
+- Page object methods should: navigate, fill, click, wait — NOT assert
 - NEVER add type hints to fixture parameters in test files
 - Add missing testdata keys with "TODO: replace with actual value" placeholder
 - Return ONLY valid JSON with this structure:
@@ -1061,11 +1075,12 @@ EXISTING TEST FILES IN REPO:
 {files_summary}
 
 Rules:
-- Decide based on the PRIMARY feature being tested (what is the main assertion/validation?)
-- If the TC spans multiple pages, choose the file based on the main behavior being tested
-- If an existing file is a good match, use it
-- If no existing file matches, suggest a new filename following pattern: tests/test_{{feature}}.py
-- Keep filenames short and descriptive (e.g. test_cart.py, test_login.py, test_checkout.py)
+- Decide based on the PRIMARY PAGE being tested (login, cart, products, checkout)
+- ALWAYS use page-based filenames — NEVER use story title as filename
+- Correct examples: test_cart.py, test_login.py, test_products.py, test_checkout.py
+- Wrong examples: test_add_item_to_cart.py, test_view_cart_contents.py, test_user_login.py
+- If an existing file matches the primary page, use it
+- If no existing file matches, create a NEW page-based file (test_cart.py NOT test_add_item_to_cart.py)
 
 Return ONLY a valid JSON object:
 {{
@@ -1162,6 +1177,9 @@ async def merge_playwright(req: MergeRequest):
             except:
                 pass
 
+            # Collect ALL files from ALL stories first, then ONE commit
+            all_files_to_push = {}
+
             for story_data in req.all_stories:
                 s_key = story_data.get("storyKey", "")
                 s_summary = story_data.get("storySummary", "")
@@ -1196,9 +1214,12 @@ EXISTING FILES:
 
 Return ONLY valid JSON: {{"target_file": "tests/test_cart.py", "exists": true}}
 Rules:
-- Base decision on PRIMARY PAGE being tested (cart, login, products, checkout)
-- Use page-based filenames: test_cart.py, test_login.py, test_products.py, test_checkout.py
-- If existing file matches, use it. Otherwise create new page-based file."""
+- Base decision on PRIMARY PAGE being tested (login, cart, products, checkout)
+- ALWAYS use page-based filenames — NEVER use story title as filename
+- Correct: test_cart.py, test_login.py, test_products.py, test_checkout.py
+- Wrong: test_add_item_to_cart.py, test_view_cart_contents.py, test_user_login.py
+- If existing file matches the primary page, use it
+- If no match, create page-based file (test_cart.py NOT test_add_item_to_cart.py)"""
 
                 decide_resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
@@ -1219,32 +1240,31 @@ Rules:
                 else:
                     s_file = f"tests/test_{s_key.lower()}.py"
 
-                existing, sha = await fetch_file(s_file)
+                existing, _ = await fetch_file(s_file)
                 s_all_pages = {}
-                s_page_shas = {}
                 for pf in ["pages/login_page.py", "pages/products_page.py", "pages/cart_page.py", "pages/checkout_page.py", "pages/base_page.py"]:
-                    code, psha = await fetch_file(pf)
+                    code, _ = await fetch_file(pf)
                     s_all_pages[pf] = code
-                    s_page_shas[pf] = psha
-                existing_testdata, testdata_sha = await fetch_file("data/testdata.json")
-                existing_conftest, conftest_sha = await fetch_file("conftest.py")
+                existing_testdata, _ = await fetch_file("data/testdata.json")
+                existing_conftest, _ = await fetch_file("conftest.py")
 
                 updates = await run_merge_claude(client, gen_code, s_file, s_key, existing, s_all_pages, existing_testdata, existing_conftest)
 
-                # Batch push all files for this story in ONE commit
-                story_files = {}
+                # Collect files — later pushed in ONE commit
                 if updates.get("test_file"):
-                    story_files[s_file] = updates["test_file"]
+                    all_files_to_push[s_file] = updates["test_file"]
                 for pf, pf_content in (updates.get("page_files") or {}).items():
                     if pf_content:
-                        story_files[pf] = pf_content
+                        all_files_to_push[pf] = pf_content
                 if updates.get("testdata"):
-                    story_files["data/testdata.json"] = updates["testdata"]
+                    all_files_to_push["data/testdata.json"] = updates["testdata"]
                 if updates.get("conftest"):
-                    story_files["conftest.py"] = updates["conftest"]
+                    all_files_to_push["conftest.py"] = updates["conftest"]
 
-                pushed = await batch_push_files(client, headers, req.repo, branch_name, story_files, s_key)
-                files_updated.extend(pushed)
+            # ONE commit for ALL stories
+            files_updated = await batch_push_files(
+                client, headers, req.repo, branch_name, all_files_to_push, req.story_key
+            )
 
             return {
                 "status": "merged",
@@ -1317,4 +1337,3 @@ Rules:
             "changes_summary": updates.get("changes_summary", ""),
             "merged_code": updates.get("test_file", req.generated_code),
         }
-

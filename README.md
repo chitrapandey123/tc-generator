@@ -18,6 +18,25 @@ TC Generator is a full-stack tool that takes a Jira user story and automates the
 5. **Automate** — Generate Playwright Python automation code and push to GitHub with CI/CD
 
 ---
+## Screenshots
+
+### 1. Stories — Browse Jira stories with TC counts
+![Stories](screenshots/stories.png)
+
+### 2. Review — Edit AI-generated test cases
+![Review](screenshots/review.png)
+
+### 3. Push — Send to Xray with requirement linking
+![Push](screenshots/push.png)
+
+### 4. Automate — Generate Playwright code
+![Automate](screenshots/automate.png)
+
+### 5. Allure Report — Step-by-step test results
+![Allure](screenshots/allure.png)
+
+
+---
 
 ## Tech Stack
 
